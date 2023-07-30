@@ -1,0 +1,389 @@
+---
+title: "Bird Strikes"
+output:
+  word_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, Limport, include = TRUE}
+# importing all the necessary libraries 
+library(RMySQL)
+library(RSQLite, quietly=T)
+library(RMySQL, quietly=T)
+library(ggplot2)
+```
+
+## Connect to Database
+
+```{r, connect}
+# # connect to database hosted on db4free server, hosted on freemysqlhosting.net
+dbcon <-  dbConnect(RMySQL::MySQL(),
+                   user = 'if0_34716394',
+                   password = 'HxgAmM9lU8Q',
+                   dbname = 'if0_34716394_birds',
+                   host = 'birdstrikes.infinityfreeapp.com',
+                   port = 3306)
+
+```
+
+## Create Database
+
+
+### Set Up
+
+Temporally removes foreign key check so that tables can be reset.
+```{sql 4A1, connection=dbcon, include = TRUE}
+/* removing foreign key checks for table creation */
+SET FOREIGN_KEY_CHECKS = 0;
+```
+
+Dropping the tables before creating them
+```{sql 4A2, connection=dbcon, include = TRUE}
+DROP TABLE IF EXISTS flights;
+```
+
+```{sql 4B1, connection=dbcon, include = TRUE}
+DROP TABLE IF EXISTS airports;
+```
+
+```{sql connection=dbcon, include = TRUE}
+DROP TABLE IF EXISTS conditions;
+```
+
+```{sql connection=dbcon, include = TRUE}
+DROP TABLE IF EXISTS strikes;
+```
+
+```{sql 4A3, connection=dbcon, include = TRUE}
+/* setting the foreign key checks back to 1 */
+SET FOREIGN_KEY_CHECKS = 1;
+```
+
+### A  - Flights table
+
+Creates tables with the necessary column restrictions
+```{sql 4A4, connection=dbcon}
+CREATE TABLE flights (
+  fid INTEGER PRIMARY KEY,       /* PK */
+  date DATE,
+  origin INTEGER,
+  airline TEXT ,
+  aircraft TEXT ,
+  altitude INTEGER CHECK (altitude > 0),   /* checking certain constraints */
+  heavy TINYINT);   /* tinyint available instead of boolean values in mysql  (0,1) */ 
+```
+
+### B  - Airports Table
+
+```{sql 4B2, connection=dbcon}
+CREATE TABLE airports (
+  aid INT PRIMARY KEY ,   /* pk */
+  airportState TEXT,
+  airportCode TEXT DEFAULT NULL   /*can be left empty as mentioned in the question*/
+);
+```
+
+### C  Connecting Flights and Airports using foreign key id.
+
+```{sql 4C, connection = dbcon}
+ALTER TABLE flights ADD FOREIGN KEY (origin) REFERENCES airports(aid);  
+```
+
+### D  - Creating table 'conditions'
+
+```{sql 4D, connection= dbcon}
+
+CREATE TABLE conditions (
+    cid INT AUTO_INCREMENT PRIMARY KEY,
+    sky_condition VARCHAR(255),
+    explanation TEXT    
+)
+```
+
+### E  - Creating table 'Strikes'
+
+```{sql 4E, connection=dbcon }
+
+CREATE TABLE strikes (
+  sid INTEGER PRIMARY KEY,
+  fid INTEGER,
+  numbirds INTEGER,
+  impact TEXT,
+  damage BOOLEAN,
+  altitude INTEGER CHECK (altitude >= 0),
+  conditions INTEGER REFERENCES conditions (cid),
+  UNIQUE(fid)       /* taking only first instance of the strikes */
+);
+
+
+```
+
+### F -  Adding foreign key fid to strikes
+
+```{sql 4F, connection=dbcon }
+ALTER TABLE strikes ADD FOREIGN KEY (fid) REFERENCES flights(fid)  /* adding fid to strikes referencing flights table*/
+```
+
+### G  - Evaluating the table
+
+```{sql 4G1, connection=dbcon, eval =F}
+SELECT * FROM flights;
+```
+
+```{sql 4G2, connection=dbcon, eval =F}
+SELECT * FROM airports;
+```
+
+```{sql 4G3, connection=dbcon, eval =F}
+SELECT * FROM conditions;
+```
+
+```{sql 4G4, connection=dbcon, eval =F}
+SELECT * FROM strikes;
+```
+
+## 5  - Connecting the csv to the database
+
+
+note:-  the question says directly from the file. I asked professor about this,
+    if is a problem simply change link to file name*/
+
+
+```{r 5}
+# invoking the database directly  from the link.
+
+bird_url <- "https://s3.us-east-2.amazonaws.com/artificium.us/datasets/BirdStrikesData-V2.csv"
+
+bds.raw <- read.csv(file = bird_url, header = T,
+                   stringsAsFactors = F)
+```
+
+## 6   - Populating the tables from the dataframe bds.raw
+
+USE AS REFERENCE :- 
+http://artificium.us/lessons/06.r/l-6-301-sqlite-from-r/l-6-301.html#Querying_Data_Frames_with_sqldf*/
+
+
+
+Airports
+```{r 6 (airports table)}
+# airports table 
+states <- unique(bds.raw$origin)    # getting the unique states 
+n_states <- length(states)         
+aid <- 1:n_states                   
+
+# making a data frame and then using dbwritetable to populate the table from the data.frame
+airports <- data.frame(aid = aid,airportState= ifelse(is.na(states),"unknown",states),airportCode=NA)
+dbWriteTable(dbcon, "airports", airports,row.names= FALSE, append= TRUE )
+```
+
+Flights Table
+```{r 6 flights table}
+
+# taking the unique identifies directly form the bds.raw rid column
+fid <- bds.raw$rid           
+date <- as.Date(bds.raw$flight_date, format = '%m/%d/%Y')     # taking only the date 
+
+# foreign key which connects the airports and the flights table  
+origin <- airports$aid[match(bds.raw$origin, airports$airportState)]    
+
+# default value as unknown if there is no airline and aircraft 
+airline <- ifelse(is.na(bds.raw$airline), "Unknown", bds.raw$airline)
+aircraft <- ifelse(is.na(bds.raw$aircraft), "Unknown", bds.raw$aircraft)
+# altitude is a string with ',', therefore converted it to integer and remove the ','
+altitude <- as.integer(gsub(",", '', bds.raw$altitude_ft))
+
+# {TRUE:1, FALSE:0}
+heavy <- ifelse(bds.raw$heavy_flag == 'Yes', 1, 0)  # mysql does not take boolean values 
+
+# Create the flights dataFrame
+flights <- data.frame(fid, date, origin, airline, aircraft, altitude, heavy)
+
+# Insert the values into the flights table
+dbWriteTable(dbcon, 'flights', flights, row.names = FALSE, append = TRUE)
+
+```
+
+
+Conditions table 
+```{r 6 Conditions table}
+# taking the unique conditions
+cid <- 1: length(unique(bds.raw$sky_conditions))
+sky_condition <- unique(bds.raw$sky_conditions)
+explanation <- NA
+
+# making a dataframe
+conditions <- data.frame(cid = cid,
+                          sky_condition = sky_condition,
+                         explanation = explanation)
+
+# populating the table with data Frame
+dbWriteTable(dbcon, 'conditions', conditions, row.names=FALSE, append=TRUE)
+```
+
+Strikes table 
+```{r 6 Strikes Table}
+#row count variable
+n_rows <- nrow(bds.raw)
+# sid is synthetic key 
+sid <- 1:n_rows
+# fid is the foreign key that connects strikes and flights
+fid <- flights$fid
+# directly taking from the data.frame
+numbirds <- as.integer(bds.raw$wildlife_struck)
+impact <- bds.raw$impact
+
+# mysql doesnt take boolean values 
+damage <- ifelse(bds.raw$damage == 'Caused damage', 1, 0)
+
+# string with ',', converted into integer without ','
+altitude <- as.integer(gsub(",","", bds.raw$altitude_ft))
+# this is the foreign key that connects the tables strikes and conditions
+cd <- match(as.character(bds.raw$sky_condition), as.character(conditions$sky_condition))
+
+# creating a dataframe
+strikes <- data.frame(sid= sid,
+                      fid = fid,
+                      numbirds = numbirds,
+                      impact = impact,
+                      damage = damage,
+                      altitude = altitude,
+                      conditions= cd)
+
+# populating the table with our data.frame
+dbWriteTable(dbcon, 'strikes', strikes, row.names = FALSE, append=TRUE)
+```
+
+  
+## 7   Taking a look at our created tables.
+
+Flights table
+```{sql 7 flghts,connection=dbcon}
+select * from flights limit 5;
+```
+
+airports table
+```{sql 7 airports, connection=dbcon}
+select * from airports limit 5;
+```
+
+Conditions table
+```{sql 7 conditions, connection=dbcon}
+select * from conditions limit 3;
+```
+
+Strikes table
+```{sql 7 strikes, connection=dbcon}
+select * from strikes limit 5;
+```
+
+## 8   Greatest number of bird stirke incidents.
+
+```{sql 8 birdstirkes, connection=dbcon}
+select COUNT(sid) AS strikCount, airportState
+FROM strikes 
+JOIN flights ON strikes.fid = flights.fid
+JOIN airports ON  flights.origin = airports.aid
+GROUP BY airportState
+ORDER BY strikCount DESC
+limit 10;
+```
+
+## 9   Above average number of birdstrike.
+
+```{sql 9 Avg Birdstirkes, connection=dbcon}
+SELECT COUNT(sid) AS strikCount, airline
+FROM strikes
+JOIN flights ON strikes.fid = flights.fid
+GROUP BY airline
+HAVING COUNT(strikes.sid) > (
+  SELECT AVG(strikeCount) AS avStrikeCount
+  FROM (
+    SELECT COUNT(strikes.sid) AS strikeCount
+    FROM strikes
+    JOIN flights ON strikes.fid = flights.fid
+    GROUP BY flights.airline
+  ) AS subquery
+)
+```
+
+## 10  - Total number of bird strike by month.
+
+```{r 10 bird strike by month}
+p10 <- dbGetQuery(dbcon, "
+SELECT SUM(numbirds) as birds,DATE_FORMAT(flights.date, '%m') AS month
+FROM strikes
+JOIN flights ON strikes.fid = flights.fid
+GROUP BY month")
+print(p10)
+```
+
+## 11  - Bird strike by month - visualization.
+```{r 11 Bird Stirke by month visualized}
+ggplot(p10, aes(x = month, y = birds)) +
+  ggtitle('Bird Strikes by month - Visualized') +
+  geom_col()
+```
+
+## 12 Stored Procedure 
+
+```{sql 12 stored procedure, connection=dbcon}
+/* drop the procedure if exists */
+DROP PROCEDURE if exists newstrike;
+```
+
+```{r 12 query}
+# defining the procedure 
+sql_statement <- "
+CREATE PROCEDURE newstrike(
+  IN n_date DATE,
+  IN n_origin VARCHAR(255),
+  IN n_aircraft VARCHAR(255),
+  IN n_altitude INT,
+  IN n_numbirds INT,
+  IN n_conditions VARCHAR(255)
+)
+BEGIN
+  DECLARE v_fid INT;
+  DECLARE v_aid INT;
+  
+  SELECT aid INTO v_aid FROM airports WHERE aid = n_origin;
+  IF v_aid IS NULL THEN 
+    INSERT INTO airports (aid) VALUES (n_origin);
+    SET v_aid = LAST_INSERT_ID();
+  END IF;
+
+  SELECT fid INTO v_fid FROM flights WHERE fid = n_aircraft;
+  IF v_fid IS NULL THEN 
+    INSERT INTO flights (fid) VALUES (n_aircraft);
+    SET v_fid = LAST_INSERT_ID();
+  END IF;
+
+  INSERT INTO strikes (fid, numbirds, impact, damage, altitude, conditions)
+  VALUES (v_fid, n_numbirds, 'N/A', 0, n_altitude, n_conditions);
+  
+END;
+"
+
+# Execute the SQL statement
+dbExecute(dbcon, statement = sql_statement)
+```
+
+
+tests that procedure is working
+```{sql 12 testing, connection=dbcon}
+CALL newstrike('2023-06-24', 3, 'Airplane', 1000, 12, 'No Cloud');
+```
+
+As we can see that the new strike is added to the strike table
+```{sql 12 testing2, connection=dbcon}
+select * from strikes limit 5;
+```
+
+
+```{r dissconnect}
+dbDisconnect(dbcon)
+```
